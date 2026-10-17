@@ -94,8 +94,6 @@ fun EmployeeHomeScreen(
 
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    // Consulta al abrir la pantalla, cambiar fecha
-    // o presionar Actualizar.
     LaunchedEffect(
         selectedDay,
         refreshKey,
@@ -105,8 +103,6 @@ fun EmployeeHomeScreen(
         error = null
         isLoading = true
 
-        // La actualización automática se pausa
-        // cuando la app deja de estar visible.
         lifecycleOwner.lifecycle.repeatOnLifecycle(
             Lifecycle.State.STARTED
         ) {
@@ -178,7 +174,6 @@ fun EmployeeHomeScreen(
         contentPadding = PaddingValues(20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Encabezado.
         item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -216,7 +211,6 @@ fun EmployeeHomeScreen(
             }
         }
 
-        // Tarjeta de bienvenida.
         item {
             Surface(
                 shape = RoundedCornerShape(24.dp),
@@ -270,7 +264,6 @@ fun EmployeeHomeScreen(
             }
         }
 
-        // Perfil de la cuenta conectada.
         if (showProfile) {
             item {
                 EmployeeSection {
@@ -319,7 +312,6 @@ fun EmployeeHomeScreen(
             }
         }
 
-        // Mensajes de carga o error.
         if (error != null) {
             item {
                 EmployeeSection {
@@ -356,7 +348,6 @@ fun EmployeeHomeScreen(
             }
         }
 
-        // Resumen y movimientos.
         if (!showProfile && snapshot != null) {
             item {
                 EmployeeSection {
@@ -545,13 +536,39 @@ fun EmployeeHomeScreen(
                 EmployeeSection {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        val titularName = event.valueText("card_holder").ifBlank {
+                            event.valueText("employee_name").ifBlank {
+                                snapshot.valueText("name")
+                            }
+                        }
+
+                        Text(
+                            text = titularName,
+                            fontWeight = FontWeight.Bold,
+                            style = MaterialTheme.typography.titleMedium
+                        )
+
+                        Text(
+                            text = event.valueText("time"),
+                            fontWeight = FontWeight.SemiBold,
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
                             text = event.valueText("type"),
                             fontWeight = FontWeight.Bold,
                             color = if (
-                                event.valueText("type") == "DENEGADO"
+                                event.valueText("type") == "DENEGADO" ||
+                                event.valueText("type") == "DENIED"
                             ) {
                                 colors.error
                             } else {
@@ -559,15 +576,22 @@ fun EmployeeHomeScreen(
                             }
                         )
 
-                        Text(
-                            text = event.valueText("time"),
-                            fontWeight = FontWeight.SemiBold
-                        )
+                        val uid = event.valueText("uid")
+                        if (uid.isNotBlank()) {
+                            Text(
+                                text = "UID: $uid",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = colors.onSurfaceVariant
+                            )
+                        }
                     }
 
+                    val action = event.valueText("action")
+                    val door = event.valueText("door")
                     Text(
-                        text = event.valueText("door"),
-                        color = colors.onSurfaceVariant
+                        text = if (action.isNotBlank()) "$door • $action" else door,
+                        color = colors.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall
                     )
                 }
             }

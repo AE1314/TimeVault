@@ -4,6 +4,7 @@ data class Acceso(
     val id: Long,
     val puertaCodigo: String,
     val uid: String,
+    val nombrePersona: String = "",
     val estado: String,
     val direccion: String,
     val accion: String,

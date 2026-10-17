@@ -20,20 +20,17 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import com.timevault.app.SupabaseClient
 import io.github.jan.supabase.postgrest.from
+import io.github.jan.supabase.postgrest.query.Columns
 import io.github.jan.supabase.postgrest.query.Order
 import kotlinx.coroutines.delay
-import kotlinx.serialization.Serializable
-
-@Serializable
-data class AccesoModel(
-    val id: Long = 0,
-    val puerta_codigo: String = "",
-    val uid: String = "",
-    val estado: String = "",
-    val direccion: String = "",
-    val accion: String = "",
-    val creado_en: String? = null
-)
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import java.text.SimpleDateFormat
+import java.util.Locale
+import java.util.TimeZone
 
 private data class AdminAccessSummary(
     val company: String,
@@ -41,28 +38,108 @@ private data class AdminAccessSummary(
     val entries: Long,
     val exits: Long,
     val denied: Long,
-    val events: List<AccesoModel>
+    val events: List<AccessRecord>
 )
 
+private fun formatTimestamp(rawIso: String?): String {
+    if (rawIso.isNullOrBlank() || rawIso == "null") return "--:--"
+
+    return try {
+        val clean = rawIso.replace("Z", "+00:00")
+        val instant = java.time.Instant.parse(clean)
+        val zonedDateTime = instant.atZone(java.time.ZoneId.of("America/Guatemala"))
+        val formatter = java.time.format.DateTimeFormatter.ofPattern("hh:mm a · yyyy-MM-dd", Locale.US)
+        zonedDateTime.format(formatter)
+    } catch (_: Exception) {
+        try {
+            val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("UTC")
+            }
+            val date = parser.parse(rawIso.take(19)) ?: return rawIso.take(16).replace("T", " ")
+            val formatter = SimpleDateFormat("hh:mm a · yyyy-MM-dd", Locale.US).apply {
+                timeZone = TimeZone.getTimeZone("America/Guatemala")
+            }
+            formatter.format(date)
+        } catch (_: Exception) {
+            rawIso.take(16).replace("T", " ")
+        }
+    }
+}
+
 private suspend fun loadDirectAccessSummary(): AdminAccessSummary {
+    // 1. Mapeo UID -> Nombre
+    val personasRaw = SupabaseClient.client
+        .from("personas")
+        .select(columns = Columns.raw("id,nombre,tarjetas(uid)"))
+        .decodeList<JsonObject>()
+
+    val uidToName = mutableMapOf<String, String>()
+    personasRaw.forEach { row ->
+        val name = row["nombre"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val cards = row["tarjetas"] as? JsonArray
+        cards?.forEach { cardElem ->
+            val cardUid = cardElem.jsonObject["uid"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            if (cardUid.isNotBlank() && name.isNotBlank()) {
+                uidToName[cardUid.trim().uppercase()] = name
+            }
+        }
+    }
+
+    // 2. Consulta a accesos sin límite
     val list = SupabaseClient.client.from("accesos")
         .select {
             order("id", Order.DESCENDING)
-            limit(50)
         }
-        .decodeList<AccesoModel>()
+        .decodeList<JsonObject>()
 
-    val entries = list.count { it.estado.equals("AUTHORIZED", true) && it.direccion.equals("IN", true) }.toLong()
-    val exits = list.count { it.estado.equals("AUTHORIZED", true) && it.direccion.equals("OUT", true) }.toLong()
-    val denied = list.count { it.estado.contains("DENIED", true) || it.accion.contains("REJECT", true) }.toLong()
+    val records = list.map { obj ->
+        val id = obj["id"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val uid = obj["uid"]?.jsonPrimitive?.contentOrNull.orEmpty().trim().uppercase()
+        val estado = obj["estado"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val direccion = obj["direccion"]?.jsonPrimitive?.contentOrNull.orEmpty()
+        val accion = obj["accion"]?.jsonPrimitive?.contentOrNull.orEmpty()
+
+        // Columna real en Supabase: ocurrido_en
+        val rawTime = obj["ocurrido_en"]?.jsonPrimitive?.contentOrNull
+            ?: obj["creado_en"]?.jsonPrimitive?.contentOrNull
+            ?: obj["created_at"]?.jsonPrimitive?.contentOrNull
+
+        val isDenied = estado.contains("DENIED", true) || accion.contains("REJECT", true)
+        val isExit = direccion.equals("OUT", true)
+        val isRemote = uid.equals("APP_BUTTON", true) || accion.contains("REMOTE", true)
+
+        val resolvedName = when {
+            isRemote -> "Apertura desde App"
+            uidToName.containsKey(uid) -> uidToName[uid]!!
+            else -> "Tarjeta sin asignar"
+        }
+
+        val typeLabel = when {
+            isDenied -> "DENEGADO"
+            isExit -> "SALIDA"
+            else -> "ENTRADA"
+        }
+
+        AccessRecord(
+            id = id,
+            employeeName = resolvedName,
+            cardUid = uid,
+            timestamp = formatTimestamp(rawTime),
+            type = typeLabel
+        )
+    }
+
+    val entries = records.count { it.type == "ENTRADA" }.toLong()
+    val exits = records.count { it.type == "SALIDA" }.toLong()
+    val denied = records.count { it.type == "DENEGADO" }.toLong()
 
     return AdminAccessSummary(
         company = "TimeVault Security",
-        total = list.size.toLong(),
+        total = records.size.toLong(),
         entries = entries,
         exits = exits,
         denied = denied,
-        events = list
+        events = records
     )
 }
 
@@ -96,7 +173,7 @@ fun AccessScreen(isDarkTheme: Boolean = true) {
                 } finally {
                     isLoading = false
                 }
-                delay(5000L) // Actualiza cada 5 segundos
+                delay(5000L)
             }
         }
     }
@@ -230,29 +307,37 @@ fun AccessScreen(isDarkTheme: Boolean = true) {
             }
 
             items(currentSummary.events, key = { it.id }) { event ->
-                val isDenied = event.estado.contains("DENIED", true) || event.accion.contains("REJECT", true)
-                val isExit = event.direccion.equals("OUT", true)
+                val isDenied = event.type == "DENEGADO"
+                val isExit = event.type == "SALIDA"
                 val eventColor = if (isDenied) deniedColor else if (isExit) exitColor else entryColor
-                val eventLabel = if (isDenied) "DENEGADO" else if (isExit) "SALIDA / CIERRE" else "ENTRADA / APERTURA"
 
                 AccessPanelCard(cardColor = cardColor, borderColor = borderColor) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(
-                            text = "UID: ${event.uid}",
-                            color = textColor,
-                            fontWeight = FontWeight.Bold,
-                            fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
-                            modifier = Modifier.weight(1f)
-                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = event.employeeName,
+                                color = textColor,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 17.sp
+                            )
+                            Spacer(Modifier.height(2.dp))
+                            Text(
+                                text = event.timestamp,
+                                color = secondaryColor,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+
                         Surface(
                             shape = RoundedCornerShape(8.dp),
                             color = eventColor.copy(alpha = 0.15f)
                         ) {
                             Text(
-                                text = eventLabel,
+                                text = event.type,
                                 color = eventColor,
                                 fontWeight = FontWeight.Bold,
                                 modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
@@ -260,7 +345,14 @@ fun AccessScreen(isDarkTheme: Boolean = true) {
                             )
                         }
                     }
-                    Text("Acción: ${event.accion} | Puerta: ${event.puerta_codigo}", color = secondaryColor, fontSize = 13.sp)
+
+                    if (event.cardUid.isNotBlank() && event.cardUid != "APP_BUTTON") {
+                        Text(
+                            text = "UID: ${event.cardUid}",
+                            color = secondaryColor.copy(alpha = 0.7f),
+                            fontSize = 11.sp
+                        )
+                    }
                 }
             }
         }

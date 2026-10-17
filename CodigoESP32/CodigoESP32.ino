@@ -11,9 +11,9 @@
 #define RST_PIN    22
 #define RELAY_PIN  4
 
-#define LED_ROJO   2      // Ánodo común: LOW enciende, HIGH apaga
-#define LED_VERDE  13     // Ánodo común: LOW enciende, HIGH apaga
-#define BUZZER_PIN 15     // Buzzer: HIGH enciende, LOW apaga
+#define LED_ROJO   2      // LOW: encendido, HIGH: apagado
+#define LED_VERDE  13     // LOW: encendido, HIGH: apagado
+#define BUZZER_PIN 15     // HIGH: encendido, LOW: apagado
 
 MFRC522 mfrc522(SS_PIN, RST_PIN);
 
@@ -24,6 +24,7 @@ unsigned long lastPollTime = 0;
 const unsigned long POLL_INTERVAL = 2000;
 
 bool puertaAbierta = false;
+String uidActivoEnSala = "";
 
 WiFiClientSecure client;
 
@@ -47,10 +48,9 @@ void setup() {
 
   SPI.begin();
   mfrc522.PCD_Init();
-  Serial.println("\n[SISTEMA] Perifericos y Lector RFID inicializados.");
+  Serial.println("\n[SISTEMA] Periféricos y Lector RFID listos.");
 
   client.setInsecure();
-
   conectarWiFi();
 }
 
@@ -59,13 +59,13 @@ void loop() {
     conectarWiFi();
   }
 
-  // Polling para sincronizar cambios remotos desde la app
+  // Sincronización remota desde la app
   if (millis() - lastPollTime >= POLL_INTERVAL) {
     lastPollTime = millis();
     checkVaultSettings();
   }
 
-  // Comprobar presencia y lectura de tarjeta RFID
+  // Detección de tarjeta RFID
   if (!mfrc522.PICC_IsNewCardPresent() || !mfrc522.PICC_ReadCardSerial()) {
     return;
   }
@@ -80,38 +80,45 @@ void loop() {
   Serial.print("\n[RFID] Tarjeta detectada: ");
   Serial.println(uidString);
 
-  // Validación directa contra Supabase con logs completos
+  // 1. Validar si la tarjeta existe y está activa en Supabase
   bool autorizado = verificarAccesoEnSupabase(uidString);
 
   if (!autorizado) {
-    Serial.println("[RFID] DENEGADO: Tarjeta no autorizada o inactiva.");
+    Serial.println("[RFID] DENEGADO: Tarjeta no autorizada.");
     feedbackError();
-    registrarAcceso(uidString, false, puertaAbierta ? "OUT" : "IN", "REJECT_INACTIVE_OR_UNAUTHORIZED");
-  } else {
-    puertaAbierta = !puertaAbierta;
-    aplicarEstadoFisico(puertaAbierta);
-
-    if (puertaAbierta) {
-      feedbackAbrir();
-      Serial.println("[PUERTA] ABIERTA con credencial autorizada.");
-      registrarAcceso(uidString, true, "IN", "UNLOCK");
-      syncLockToSupabase(false);
-    } else {
-      feedbackCerrar();
-      Serial.println("[PUERTA] CERRADA con credencial autorizada.");
-      registrarAcceso(uidString, true, "OUT", "LOCK");
-      syncLockToSupabase(true);
-    }
+    registrarAcceso(uidString, false, puertaAbierta ? "OUT" : "IN", "REJECT_UNAUTHORIZED");
+    delay(1000);
+    return;
   }
 
-  mfrc522.PICC_HaltA();
-  mfrc522.PCD_StopCrypto1();
-  delay(1000);
+  // 2. Control de acceso
+  if (puertaAbierta) {
+    puertaAbierta = false;
+    aplicarEstadoFisico(false);
+    feedbackCerrar();
+    Serial.println("[PUERTA] SALIDA AUTORIZADA. CERRADA / BLOQUEADA.");
+    registrarAcceso(uidString, true, "OUT", "LOCK");
+    syncLockToSupabase(true);
+  } else {
+    puertaAbierta = true;
+    aplicarEstadoFisico(true);
+    feedbackAbrir();
+    Serial.print("[PUERTA] ENTRADA AUTORIZADA por: ");
+    Serial.println(uidString);
+    registrarAcceso(uidString, true, "IN", "UNLOCK");
+    syncLockToSupabase(false);
+  }
+
+  delay(1500);
 }
 
 // ================= ACTUADORES =================
 void setupActuadores() {
+  // En reposo queremos circuito cerrado en NO con relé Active-LOW:
+  // Se escribe LOW para activar la bobina y conmutar el contacto NO a cerrado
+  digitalWrite(RELAY_PIN, LOW);
   pinMode(RELAY_PIN, OUTPUT);
+
   pinMode(LED_ROJO, OUTPUT);
   pinMode(LED_VERDE, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
@@ -122,13 +129,15 @@ void setupActuadores() {
 
 void aplicarEstadoFisico(bool abierta) {
   if (abierta) {
-    digitalWrite(RELAY_PIN, LOW);   // Relé activado (abierto)
-    digitalWrite(LED_ROJO, HIGH);  // Rojo apagado
-    digitalWrite(LED_VERDE, LOW);  // Verde encendido
+    // Al abrir: apagamos la bobina (HIGH), el contacto NO vuelve a su estado abierto (corta circuito)
+    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(LED_ROJO, HIGH);  // Apaga rojo
+    digitalWrite(LED_VERDE, LOW);  // Enciende verde
   } else {
-    digitalWrite(RELAY_PIN, HIGH);  // Relé reposo (cerrado)
-    digitalWrite(LED_VERDE, HIGH); // Verde apagado
-    digitalWrite(LED_ROJO, LOW);   // Rojo encendido
+    // En reposo (cerrada): energizamos la bobina (LOW), el contacto NO se une a COM (circuito cerrado)
+    digitalWrite(RELAY_PIN, LOW);
+    digitalWrite(LED_VERDE, HIGH); // Apaga verde
+    digitalWrite(LED_ROJO, LOW);   // Enciende rojo
   }
 }
 
@@ -181,60 +190,38 @@ void conectarWiFi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\n[WIFI] Conectado exitosamente.");
-    Serial.print("[WIFI] IP asignada: ");
+    Serial.println("\n[WIFI] Conectado.");
+    Serial.print("[WIFI] IP: ");
     Serial.println(WiFi.localIP());
   } else {
-    Serial.println("\n[WIFI] Error al conectar. Reintentando...");
+    Serial.println("\n[WIFI] Error al conectar.");
   }
 }
 
-// ================= CONSULTAS Y SINCRONIZACIÓN SUPABASE =================
+// ================= COMUNICACIÓN CON SUPABASE =================
 bool verificarAccesoEnSupabase(String uid) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[SUPABASE] Error: Sin conexion WiFi");
-    return false;
-  }
+  if (WiFi.status() != WL_CONNECTED) return false;
 
   HTTPClient http;
   String url = String(SUPABASE_URL) + "/rest/v1/tarjetas?uid=eq." + uid + "&select=activa";
   bool permitido = false;
 
-  Serial.print("[SUPABASE CONSULTA URL]: ");
-  Serial.println(url);
-
+  http.setTimeout(2500);
   if (http.begin(client, url)) {
     http.addHeader("apikey", SUPABASE_KEY);
     http.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
 
     int httpCode = http.GET();
-    Serial.print("[SUPABASE HTTP CODE]: ");
-    Serial.println(httpCode);
-
     if (httpCode == HTTP_CODE_OK) {
       String payload = http.getString();
-      Serial.print("[SUPABASE PAYLOAD]: ");
-      Serial.println(payload);
-
       StaticJsonDocument<256> doc;
-      DeserializationError err = deserializeJson(doc, payload);
-
-      if (err) {
-        Serial.print("[JSON ERROR]: ");
-        Serial.println(err.c_str());
-      } else if (doc.size() == 0) {
-        Serial.println("[SUPABASE]: Arreglo vacio (El UID no existe en tabla tarjetas).");
-      } else {
+      if (!deserializeJson(doc, payload) && doc.size() > 0) {
         permitido = doc[0]["activa"] | false;
-        Serial.print("[SUPABASE ESTADO ACTIVA]: ");
-        Serial.println(permitido ? "TRUE" : "FALSE");
       }
-    } else {
-      Serial.print("[SUPABASE RESPUESTA ERROR]: ");
-      Serial.println(http.getString());
     }
     http.end();
   }
+  client.stop();
   return permitido;
 }
 
@@ -244,6 +231,7 @@ void checkVaultSettings() {
   HTTPClient http;
   String url = String(SUPABASE_URL) + "/rest/v1/vault_settings?id=eq.1&select=is_locked";
 
+  http.setTimeout(2500);
   if (http.begin(client, url)) {
     http.addHeader("apikey", SUPABASE_KEY);
     http.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
@@ -262,16 +250,15 @@ void checkVaultSettings() {
 
           if (puertaAbierta) {
             feedbackAbrir();
-            Serial.println("[REMOTO] Puerta ABIERTA desde la aplicacion.");
           } else {
             feedbackCerrar();
-            Serial.println("[REMOTO] Puerta BLOQUEADA desde la aplicacion.");
           }
         }
       }
     }
     http.end();
   }
+  client.stop();
 }
 
 void syncLockToSupabase(bool lock) {
@@ -280,6 +267,7 @@ void syncLockToSupabase(bool lock) {
   HTTPClient http;
   String url = String(SUPABASE_URL) + "/rest/v1/vault_settings?id=eq.1";
 
+  http.setTimeout(2500);
   if (http.begin(client, url)) {
     http.addHeader("Content-Type", "application/json");
     http.addHeader("apikey", SUPABASE_KEY);
@@ -290,6 +278,7 @@ void syncLockToSupabase(bool lock) {
     http.sendRequest("PATCH", (uint8_t*)body.c_str(), body.length());
     http.end();
   }
+  client.stop();
 }
 
 void registrarAcceso(String uid, bool autorizado, String direccion, String accion) {
@@ -298,6 +287,7 @@ void registrarAcceso(String uid, bool autorizado, String direccion, String accio
   HTTPClient http;
   String url = String(SUPABASE_URL) + "/rest/v1/accesos";
 
+  http.setTimeout(2500);
   if (http.begin(client, url)) {
     http.addHeader("Content-Type", "application/json");
     http.addHeader("apikey", SUPABASE_KEY);
@@ -306,14 +296,15 @@ void registrarAcceso(String uid, bool autorizado, String direccion, String accio
 
     String estado = autorizado ? "AUTHORIZED" : "DENIED";
     String body = "{"
-                  "\"puerta_codigo\":\"" + String(PUERTA_CODIGO) + "\","
-                                                                   "\"uid\":\"" + uid + "\","
-                                                                                        "\"estado\":\"" + estado + "\","
-                                                                                                                   "\"direccion\":\"" + direccion + "\","
-                                                                                                                                                    "\"accion\":\"" + accion + "\""
-                                                                                                                                                                               "}";
+      "\"puerta_codigo\":\"" + String(PUERTA_CODIGO) + "\","
+      "\"uid\":\"" + uid + "\","
+      "\"estado\":\"" + estado + "\","
+      "\"direccion\":\"" + direccion + "\","
+      "\"accion\":\"" + accion + "\""
+    "}";
 
     http.POST(body);
     http.end();
   }
+  client.stop();
 }

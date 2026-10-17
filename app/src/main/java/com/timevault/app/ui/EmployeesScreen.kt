@@ -26,6 +26,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
 
+private data class DateCountRecord(
+    val date: String,
+    val count: Int
+)
+
 private data class EmployeeCard(
     val uid: String,
     val isActive: Boolean
@@ -39,7 +44,7 @@ private data class Employee(
     val cards: List<EmployeeCard>
 )
 
-// CONSULTAS A SUPABASE
+// ================= CONSULTAS A SUPABASE =================
 
 private suspend fun loadEmployees(): List<Employee> {
     return SupabaseClient.client
@@ -59,18 +64,44 @@ private suspend fun loadEmployees(): List<Employee> {
                 cards = (row["tarjetas"] as? JsonArray)
                     ?.map { element ->
                         val card = element.jsonObject
-
                         EmployeeCard(
-                            uid = card.getValue("uid")
-                                .jsonPrimitive.content,
-                            isActive = card.getValue("activa")
-                                .jsonPrimitive.boolean
+                            uid = card.getValue("uid").jsonPrimitive.content,
+                            isActive = card.getValue("activa").jsonPrimitive.boolean
                         )
                     }
                     .orEmpty()
             )
         }
         .sortedBy { it.name.lowercase() }
+}
+
+private suspend fun loadEmployeeAccessCounts(cardUids: List<String>): List<DateCountRecord> {
+    if (cardUids.isEmpty()) return emptyList()
+
+    val cleanUids = cardUids.map { it.trim().uppercase() }
+
+    val rows = SupabaseClient.client
+        .from("accesos")
+        .select {
+            filter {
+                isIn("uid", cleanUids)
+            }
+        }
+        .decodeList<JsonObject>()
+
+    return rows.mapNotNull { row ->
+        val rawDate = row["ocurrido_en"]?.jsonPrimitive?.contentOrNull
+            ?: row["creado_en"]?.jsonPrimitive?.contentOrNull
+            ?: row["created_at"]?.jsonPrimitive?.contentOrNull
+
+        if (!rawDate.isNullOrBlank() && rawDate.length >= 10) {
+            rawDate.substring(0, 10)
+        } else null
+    }
+        .groupingBy { it }
+        .eachCount()
+        .map { (date, count) -> DateCountRecord(date, count) }
+        .sortedByDescending { it.date }
 }
 
 private suspend fun registerPerson(
@@ -107,8 +138,6 @@ private suspend fun assignEmployeeCard(
     employeeId: String,
     cardUid: String
 ) {
-    // La función SQL verifica el rol, la empresa,
-    // el estado de la persona y la disponibilidad del UID.
     SupabaseClient.client.postgrest.rpc(
         function = "assign_employee_card",
         parameters = buildJsonObject {
@@ -141,7 +170,6 @@ private suspend fun updateEmployeeStatus(
             filter {
                 eq("id", employeeId)
             }
-
             select()
         }
         .decodeList<JsonObject>()
@@ -154,7 +182,7 @@ private suspend fun updateEmployeeStatus(
     )
 }
 
-// PANTALLA PRINCIPAL
+// ================= PANTALLA PRINCIPAL =================
 
 @Composable
 fun EmployeesScreen(isDarkTheme: Boolean = true) {
@@ -169,56 +197,16 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
     var refreshKey by remember { mutableIntStateOf(0) }
 
     var showAddDialog by remember { mutableStateOf(false) }
+    var employeeToEdit by remember { mutableStateOf<Employee?>(null) }
+    var employeeToAssignCard by remember { mutableStateOf<Employee?>(null) }
+    var employeeToDelete by remember { mutableStateOf<Employee?>(null) }
+    var employeeToToggle by remember { mutableStateOf<Employee?>(null) }
 
-    var employeeToEdit by remember {
-        mutableStateOf<Employee?>(null)
-    }
-
-    var employeeToAssignCard by remember {
-        mutableStateOf<Employee?>(null)
-    }
-
-    var employeeToDelete by remember {
-        mutableStateOf<Employee?>(null)
-    }
-
-    var employeeToToggle by remember {
-        mutableStateOf<Employee?>(null)
-    }
-
-    var employeeToInvite by remember {
-        mutableStateOf<Employee?>(null)
-    }
-
-    val backgroundColor = if (isDarkTheme) {
-        Color(0xFF0C192B)
-    } else {
-        Color(0xFFF3F6FA)
-    }
-
-    val cardColor = if (isDarkTheme) {
-        Color(0xFF192B3D)
-    } else {
-        Color.White
-    }
-
-    val textColor = if (isDarkTheme) {
-        Color(0xFFF4F7FB)
-    } else {
-        Color(0xFF142438)
-    }
-
-    val secondaryColor = if (isDarkTheme) {
-        Color(0xFFB3C1D1)
-    } else {
-        Color(0xFF58697B)
-    }
-
-    val accentColor = if (isDarkTheme) {
-        Color(0xFF63E1CC)
-    } else {
-        Color(0xFF087F75)
-    }
+    val backgroundColor = if (isDarkTheme) Color(0xFF0C192B) else Color(0xFFF3F6FA)
+    val cardColor = if (isDarkTheme) Color(0xFF192B3D) else Color.White
+    val textColor = if (isDarkTheme) Color(0xFFF4F7FB) else Color(0xFF142438)
+    val secondaryColor = if (isDarkTheme) Color(0xFFB3C1D1) else Color(0xFF58697B)
+    val accentColor = if (isDarkTheme) Color(0xFF63E1CC) else Color(0xFF087F75)
 
     LaunchedEffect(refreshKey) {
         isLoading = true
@@ -230,10 +218,8 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
             throw cancelled
         } catch (_: Exception) {
             employees = emptyList()
-
             errorMessage =
-                "No pudimos cargar el personal. " +
-                        "Revisá la conexión y los permisos de tu cuenta."
+                "No pudimos cargar el personal. Revisá la conexión y los permisos de tu cuenta."
         } finally {
             isLoading = false
         }
@@ -278,7 +264,7 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
                 Spacer(Modifier.height(6.dp))
 
                 Text(
-                    text = "Administrá el personal de tu empresa.",
+                    text = "Administrá el personal y su registro completo de accesos.",
                     color = secondaryColor,
                     fontSize = 15.sp
                 )
@@ -325,39 +311,23 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(22.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = cardColor
-                )
+                colors = CardDefaults.cardColors(containerColor = cardColor)
             ) {
                 Column(Modifier.padding(20.dp)) {
+                    Text(text = "Personal cargado", color = secondaryColor)
                     Text(
-                        text = "Personal cargado",
-                        color = secondaryColor
-                    )
-
-                    Text(
-                        text = if (isLoading) {
-                            "…"
-                        } else {
-                            employees.size.toString()
-                        },
+                        text = if (isLoading) "…" else employees.size.toString(),
                         color = textColor,
                         fontSize = 34.sp,
                         fontWeight = FontWeight.Bold
                     )
 
                     if (!isLoading && errorMessage == null) {
-                        val activeCount = employees.count {
-                            it.isActive
-                        }
-
-                        val inactiveCount = employees.count {
-                            !it.isActive
-                        }
+                        val activeCount = employees.count { it.isActive }
+                        val inactiveCount = employees.count { !it.isActive }
 
                         Text(
-                            text = "$activeCount activos · " +
-                                    "$inactiveCount inactivos",
+                            text = "$activeCount activos · $inactiveCount inactivos",
                             color = accentColor,
                             fontSize = 14.sp
                         )
@@ -371,30 +341,18 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
                 modifier = Modifier.fillMaxWidth(),
-                label = {
-                    Text("Buscar nombre, código o tarjeta")
-                },
+                label = { Text("Buscar nombre, código o tarjeta") },
                 singleLine = true,
                 shape = RoundedCornerShape(16.dp)
             )
         }
 
         successMessage?.let { message ->
-            item {
-                Text(
-                    text = message,
-                    color = accentColor
-                )
-            }
+            item { Text(text = message, color = accentColor) }
         }
 
         errorMessage?.let { message ->
-            item {
-                Text(
-                    text = message,
-                    color = MaterialTheme.colorScheme.error
-                )
-            }
+            item { Text(text = message, color = MaterialTheme.colorScheme.error) }
         }
 
         if (isLoading) {
@@ -405,20 +363,14 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
                         .padding(32.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    CircularProgressIndicator(
-                        color = accentColor
-                    )
+                    CircularProgressIndicator(color = accentColor)
                 }
             }
         } else {
             if (visibleEmployees.isEmpty() && errorMessage == null) {
                 item {
                     Text(
-                        text = if (query.isBlank()) {
-                            "Todavía no hay personal visible."
-                        } else {
-                            "No encontramos coincidencias."
-                        },
+                        text = if (query.isBlank()) "Todavía no hay personal visible." else "No encontramos coincidencias.",
                         modifier = Modifier.padding(vertical = 20.dp),
                         color = secondaryColor
                     )
@@ -429,204 +381,39 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
                 items = visibleEmployees,
                 key = { it.id }
             ) { employee ->
-                var menuExpanded by remember {
-                    mutableStateOf(false)
-                }
-
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(20.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = cardColor
-                    )
-                ) {
-                    Column(Modifier.padding(18.dp)) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    text = employee.name,
-                                    color = textColor,
-                                    fontSize = 19.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-
-                                Spacer(Modifier.height(4.dp))
-
-                                Text(
-                                    text = "Código: ${employee.code}",
-                                    color = secondaryColor,
-                                    fontSize = 14.sp
-                                )
-                            }
-
-                            Box {
-                                IconButton(
-                                    onClick = {
-                                        menuExpanded = true
-                                    },
-                                    modifier = Modifier.semantics {
-                                        contentDescription =
-                                            "Opciones de ${employee.name}"
-                                    }
-                                ) {
-                                    Text(
-                                        text = "⋮",
-                                        fontSize = 28.sp,
-                                        color = secondaryColor
-                                    )
-                                }
-
-                                DropdownMenu(
-                                    expanded = menuExpanded,
-                                    onDismissRequest = {
-                                        menuExpanded = false
-                                    }
-                                ) {
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text("Editar persona")
-                                        },
-                                        onClick = {
-                                            menuExpanded = false
-                                            successMessage = null
-                                            employeeToEdit = employee
-                                        }
-                                    )
-
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text("Asignar tarjeta")
-                                        },
-                                        enabled = employee.isActive,
-                                        onClick = {
-                                            menuExpanded = false
-                                            successMessage = null
-                                            employeeToAssignCard = employee
-                                        }
-                                    )
-
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text("Invitar a la app")
-                                        },
-                                        enabled = employee.isActive,
-                                        onClick = {
-                                            menuExpanded = false
-                                            successMessage = null
-                                            employeeToInvite = employee
-                                        }
-                                    )
-
-                                    DropdownMenuItem(
-                                        text = {
-                                            Text(
-                                                text = "Eliminar persona",
-                                                color = MaterialTheme
-                                                    .colorScheme.error
-                                            )
-                                        },
-                                        onClick = {
-                                            menuExpanded = false
-                                            successMessage = null
-                                            employeeToDelete = employee
-                                        }
-                                    )
-                                }
-                            }
-                        }
-
-                        Spacer(Modifier.height(16.dp))
-
-                        Text(
-                            text = "TARJETAS",
-                            color = secondaryColor,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 1.sp
-                        )
-
-                        Spacer(Modifier.height(6.dp))
-
-                        if (employee.cards.isEmpty()) {
-                            Text(
-                                text = "Sin tarjeta asignada",
-                                color = secondaryColor,
-                                fontSize = 14.sp
-                            )
-                        } else {
-                            employee.cards.forEach { card ->
-                                val status = if (card.isActive) {
-                                    "Activa"
-                                } else {
-                                    "Inactiva"
-                                }
-
-                                Text(
-                                    text = "${card.uid} · $status",
-                                    color = if (card.isActive) {
-                                        accentColor
-                                    } else {
-                                        secondaryColor
-                                    },
-                                    fontSize = 14.sp
-                                )
-                            }
-                        }
-
-                        Spacer(Modifier.height(12.dp))
-
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(
-                                    text = "Estado del personal",
-                                    color = secondaryColor,
-                                    fontSize = 12.sp
-                                )
-
-                                Text(
-                                    text = if (employee.isActive) {
-                                        "Activo"
-                                    } else {
-                                        "Inactivo"
-                                    },
-                                    color = if (employee.isActive) {
-                                        accentColor
-                                    } else {
-                                        secondaryColor
-                                    },
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-
-                            Switch(
-                                checked = employee.isActive,
-                                onCheckedChange = {
-                                    successMessage = null
-                                    employeeToToggle = employee
-                                }
-                            )
-                        }
+                EmployeeItemCard(
+                    employee = employee,
+                    cardColor = cardColor,
+                    textColor = textColor,
+                    secondaryColor = secondaryColor,
+                    accentColor = accentColor,
+                    onEdit = {
+                        successMessage = null
+                        employeeToEdit = employee
+                    },
+                    onAssignCard = {
+                        successMessage = null
+                        employeeToAssignCard = employee
+                    },
+                    onDelete = {
+                        successMessage = null
+                        employeeToDelete = employee
+                    },
+                    onToggleStatus = {
+                        successMessage = null
+                        employeeToToggle = employee
                     }
-                }
+                )
             }
         }
     }
 
-    // DIÁLOGO: AGREGAR PERSONA
-
+    // DIÁLOGOS
     if (showAddDialog) {
         EmployeeEditorDialog(
             employee = null,
             containerColor = cardColor,
-            onDismiss = {
-                showAddDialog = false
-            },
+            onDismiss = { showAddDialog = false },
             onSaved = {
                 showAddDialog = false
                 searchQuery = ""
@@ -636,16 +423,12 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
         )
     }
 
-    // DIÁLOGO: EDITAR PERSONA
-
     employeeToEdit?.let { employee ->
         key(employee.id) {
             EmployeeEditorDialog(
                 employee = employee,
                 containerColor = cardColor,
-                onDismiss = {
-                    employeeToEdit = null
-                },
+                onDismiss = { employeeToEdit = null },
                 onSaved = {
                     employeeToEdit = null
                     successMessage = "Datos actualizados correctamente."
@@ -655,71 +438,33 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
         }
     }
 
-    // DIÁLOGO: ASIGNAR TARJETA
-
     employeeToAssignCard?.let { employee ->
         key(employee.id) {
             AssignEmployeeCardDialog(
                 employee = employee,
                 containerColor = cardColor,
-                onDismiss = {
-                    employeeToAssignCard = null
-                },
+                onDismiss = { employeeToAssignCard = null },
                 onAssigned = {
                     employeeToAssignCard = null
-                    successMessage =
-                        "Tarjeta vinculada y activa para ${employee.name}."
+                    successMessage = "Tarjeta vinculada y activa para ${employee.name}."
                     refreshKey++
                 }
             )
         }
     }
-
-    // DIÁLOGO: INVITAR A LA APP
-
-    employeeToInvite?.let { employee ->
-        key(employee.id) {
-            InviteEmployeeDialog(
-                personId = employee.id,
-                personName = employee.name,
-                onDismiss = {
-                    employeeToInvite = null
-                },
-                onInvited = {
-                    employeeToInvite = null
-                    successMessage =
-                        "Invitación enviada y perfil vinculado."
-                    refreshKey++
-                }
-            )
-        }
-    }
-
-    // DIÁLOGO: ELIMINAR PERSONA
 
     employeeToDelete?.let { employee ->
         key(employee.id) {
             EmployeeActionDialog(
                 title = "¿Eliminar persona?",
-                message =
-                    "Vas a eliminar a ${employee.name}. " +
-                            "Esta acción no se puede deshacer.\n\n" +
-                            "Solo se permite si no tiene registros, tarjetas " +
-                            "asignadas ni una cuenta vinculada.",
+                message = "Vas a eliminar a ${employee.name}. Esta acción no se puede deshacer.\n\n" +
+                        "Solo se permite si no tiene registros ni tarjetas vinculadas.",
                 confirmText = "Eliminar",
-                failureMessage =
-                    "No pudimos confirmar la eliminación. Puede tener " +
-                            "registros, tarjetas o una cuenta vinculada, o haber " +
-                            "un problema de conexión o permisos. Cerrá este " +
-                            "diálogo y actualizá la lista antes de reintentar.",
+                failureMessage = "No pudimos confirmar la eliminación. Puede tener registros o tarjetas activas.",
                 isDestructive = true,
                 containerColor = cardColor,
-                action = {
-                    deleteEmployee(employee.id)
-                },
-                onDismiss = {
-                    employeeToDelete = null
-                },
+                action = { deleteEmployee(employee.id) },
+                onDismiss = { employeeToDelete = null },
                 onSuccess = {
                     employeeToDelete = null
                     successMessage = "Persona eliminada."
@@ -729,28 +474,14 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
         }
     }
 
-    // DIÁLOGO: ACTIVAR O DESACTIVAR
-
     employeeToToggle?.let { employee ->
         val newStatus = !employee.isActive
-
         key(employee.id) {
             EmployeeActionDialog(
-                title = if (newStatus) {
-                    "¿Activar persona?"
-                } else {
-                    "¿Desactivar persona?"
-                },
-                message =
-                    "${employee.name} quedará " +
-                            (if (newStatus) "activa" else "inactiva") +
-                            " en el registro de personal. " +
-                            "Esto no elimina su cuenta de inicio de sesión. " +
-                            "El panel del empleado exige que la persona esté activa.",
+                title = if (newStatus) "¿Activar persona?" else "¿Desactivar persona?",
+                message = "${employee.name} quedará " + (if (newStatus) "activa" else "inactiva") + " en el sistema.",
                 confirmText = "Confirmar",
-                failureMessage =
-                    "No pudimos confirmar el cambio. Cerrá este diálogo " +
-                            "y actualizá la lista para comprobar el estado.",
+                failureMessage = "No pudimos confirmar el cambio de estado.",
                 isDestructive = false,
                 containerColor = cardColor,
                 action = {
@@ -759,9 +490,7 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
                         isActive = newStatus
                     )
                 },
-                onDismiss = {
-                    employeeToToggle = null
-                },
+                onDismiss = { employeeToToggle = null },
                 onSuccess = {
                     employeeToToggle = null
                     successMessage = "Estado actualizado correctamente."
@@ -772,7 +501,250 @@ fun EmployeesScreen(isDarkTheme: Boolean = true) {
     }
 }
 
-// FORMULARIO PARA ASIGNAR UNA TARJETA A UNA PERSONA EXISTENTE
+// ================= TARJETA INDIVIDUAL CON CONTEO POR FECHA =================
+
+@Composable
+private fun EmployeeItemCard(
+    employee: Employee,
+    cardColor: Color,
+    textColor: Color,
+    secondaryColor: Color,
+    accentColor: Color,
+    onEdit: () -> Unit,
+    onAssignCard: () -> Unit,
+    onDelete: () -> Unit,
+    onToggleStatus: () -> Unit
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    var isLogsExpanded by remember { mutableStateOf(false) }
+    var dateCounts by remember { mutableStateOf<List<DateCountRecord>>(emptyList()) }
+    var loadingLogs by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = cardColor)
+    ) {
+        Column(Modifier.padding(18.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        text = employee.name,
+                        color = textColor,
+                        fontSize = 19.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+
+                    Spacer(Modifier.height(4.dp))
+
+                    Text(
+                        text = "Código: ${employee.code}",
+                        color = secondaryColor,
+                        fontSize = 14.sp
+                    )
+                }
+
+                Box {
+                    IconButton(
+                        onClick = { menuExpanded = true },
+                        modifier = Modifier.semantics {
+                            contentDescription = "Opciones de ${employee.name}"
+                        }
+                    ) {
+                        Text(text = "⋮", fontSize = 28.sp, color = secondaryColor)
+                    }
+
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Editar persona") },
+                            onClick = {
+                                menuExpanded = false
+                                onEdit()
+                            }
+                        )
+
+                        DropdownMenuItem(
+                            text = { Text("Asignar tarjeta") },
+                            enabled = employee.isActive,
+                            onClick = {
+                                menuExpanded = false
+                                onAssignCard()
+                            }
+                        )
+
+                        DropdownMenuItem(
+                            text = { Text("Eliminar persona", color = MaterialTheme.colorScheme.error) },
+                            onClick = {
+                                menuExpanded = false
+                                onDelete()
+                            }
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(16.dp))
+
+            Text(
+                text = "TARJETAS ASIGNADAS",
+                color = secondaryColor,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            )
+
+            Spacer(Modifier.height(6.dp))
+
+            if (employee.cards.isEmpty()) {
+                Text(
+                    text = "Sin tarjeta asignada",
+                    color = secondaryColor,
+                    fontSize = 14.sp
+                )
+            } else {
+                employee.cards.forEach { card ->
+                    val status = if (card.isActive) "Activa" else "Inactiva"
+                    Text(
+                        text = "${card.uid} · $status",
+                        color = if (card.isActive) accentColor else secondaryColor,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(text = "Estado del personal", color = secondaryColor, fontSize = 12.sp)
+                    Text(
+                        text = if (employee.isActive) "Activo" else "Inactivo",
+                        color = if (employee.isActive) accentColor else secondaryColor,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+
+                Switch(
+                    checked = employee.isActive,
+                    onCheckedChange = { onToggleStatus() }
+                )
+            }
+
+            Spacer(Modifier.height(12.dp))
+            HorizontalDivider(color = secondaryColor.copy(alpha = 0.2f))
+            Spacer(Modifier.height(8.dp))
+
+            // REGISTROS AGRUPADOS POR FECHA
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Registros por fecha",
+                    fontWeight = FontWeight.SemiBold,
+                    color = textColor,
+                    fontSize = 14.sp
+                )
+
+                TextButton(
+                    onClick = {
+                        val next = !isLogsExpanded
+                        isLogsExpanded = next
+                        if (next && dateCounts.isEmpty() && employee.cards.isNotEmpty()) {
+                            loadingLogs = true
+                            scope.launch {
+                                try {
+                                    dateCounts = loadEmployeeAccessCounts(employee.cards.map { it.uid })
+                                } catch (_: Exception) {
+                                    dateCounts = emptyList()
+                                } finally {
+                                    loadingLogs = false
+                                }
+                            }
+                        }
+                    }
+                ) {
+                    Text(
+                        text = if (isLogsExpanded) "Ocultar" else "Ver registros",
+                        color = accentColor,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+
+            if (isLogsExpanded) {
+                if (loadingLogs) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(modifier = Modifier.size(24.dp), color = accentColor)
+                    }
+                } else if (employee.cards.isEmpty()) {
+                    Text(
+                        text = "Sin tarjetas asignadas.",
+                        color = secondaryColor,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                } else if (dateCounts.isEmpty()) {
+                    Text(
+                        text = "0 registros encontrados.",
+                        color = secondaryColor,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(vertical = 4.dp)
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(top = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        dateCounts.forEach { item ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(secondaryColor.copy(alpha = 0.08f), RoundedCornerShape(8.dp))
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    text = item.date,
+                                    color = textColor,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                                Text(
+                                    text = "${item.count} marcaciones",
+                                    color = accentColor,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ================= FORMULARIO ASIGNAR TARJETA =================
 
 @Composable
 private fun AssignEmployeeCardDialog(
@@ -782,26 +754,17 @@ private fun AssignEmployeeCardDialog(
     onAssigned: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
-
     var cardUid by remember { mutableStateOf("") }
     var isSaving by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
-        onDismissRequest = {
-            if (!isSaving) {
-                onDismiss()
-            }
-        },
+        onDismissRequest = { if (!isSaving) onDismiss() },
         containerColor = containerColor,
-        title = {
-            Text("Asignar tarjeta")
-        },
+        title = { Text("Asignar tarjeta") },
         text = {
             Column(
-                modifier = Modifier.verticalScroll(
-                    rememberScrollState()
-                ),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(
@@ -809,12 +772,10 @@ private fun AssignEmployeeCardDialog(
                     fontWeight = FontWeight.Bold,
                     style = MaterialTheme.typography.titleMedium
                 )
-
                 Text(
                     text = "Código del empleado: ${employee.code}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-
                 OutlinedTextField(
                     value = cardUid,
                     onValueChange = {
@@ -822,29 +783,13 @@ private fun AssignEmployeeCardDialog(
                         errorMessage = null
                     },
                     enabled = !isSaving,
-                    label = {
-                        Text("UID de la tarjeta")
-                    },
-                    supportingText = {
-                        Text("Copiá el UID real que muestra el lector.")
-                    },
+                    label = { Text("UID de la tarjeta") },
+                    supportingText = { Text("Copiá el UID real que muestra el lector.") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-
-                Text(
-                    text =
-                        "Esta tarjeta se agregará a ${employee.name}. " +
-                                "Las tarjetas que ya tenga seguirán asignadas.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
                 errorMessage?.let {
-                    Text(
-                        text = it,
-                        color = MaterialTheme.colorScheme.error
-                    )
+                    Text(text = it, color = MaterialTheme.colorScheme.error)
                 }
             }
         },
@@ -853,65 +798,40 @@ private fun AssignEmployeeCardDialog(
                 enabled = !isSaving && cardUid.isNotBlank(),
                 onClick = {
                     val uid = cardUid.trim()
-
                     if (uid.isBlank() || uid.length > 100) {
-                        errorMessage =
-                            "Ingresá un UID de entre 1 y 100 caracteres."
+                        errorMessage = "Ingresá un UID válido."
                     } else {
                         isSaving = true
                         errorMessage = null
-
                         scope.launch {
                             var assigned = false
-
                             try {
-                                assignEmployeeCard(
-                                    employeeId = employee.id,
-                                    cardUid = uid
-                                )
-
+                                assignEmployeeCard(employeeId = employee.id, cardUid = uid)
                                 assigned = true
                             } catch (cancelled: CancellationException) {
                                 throw cancelled
                             } catch (_: Exception) {
-                                errorMessage =
-                                    "No pudimos confirmar la asignación. " +
-                                            "El UID podría estar ocupado o vinculado " +
-                                            "a una tarjeta inactiva. También revisá " +
-                                            "la conexión y que la persona siga activa. " +
-                                            "Cerrá y actualizá la lista antes de reintentar."
+                                errorMessage = "No pudimos confirmar la asignación. Verificá si el UID ya está en uso."
                             } finally {
                                 isSaving = false
                             }
-
-                            if (assigned) {
-                                onAssigned()
-                            }
+                            if (assigned) onAssigned()
                         }
                     }
                 }
             ) {
-                Text(
-                    text = if (isSaving) {
-                        "Asignando…"
-                    } else {
-                        "Asignar tarjeta"
-                    }
-                )
+                Text(text = if (isSaving) "Asignando…" else "Asignar tarjeta")
             }
         },
         dismissButton = {
-            TextButton(
-                enabled = !isSaving,
-                onClick = onDismiss
-            ) {
+            TextButton(enabled = !isSaving, onClick = onDismiss) {
                 Text("Cancelar")
             }
         }
     )
 }
 
-// FORMULARIO PARA AGREGAR O EDITAR PERSONAS
+// ================= FORMULARIO AGREGAR / EDITAR =================
 
 @Composable
 private fun EmployeeEditorDialog(
@@ -922,40 +842,19 @@ private fun EmployeeEditorDialog(
 ) {
     val scope = rememberCoroutineScope()
     val isEditing = employee != null
-
-    var name by remember {
-        mutableStateOf(employee?.name.orEmpty())
-    }
-
-    var code by remember {
-        mutableStateOf(employee?.code.orEmpty())
-    }
-
+    var name by remember { mutableStateOf(employee?.name.orEmpty()) }
+    var code by remember { mutableStateOf(employee?.code.orEmpty()) }
     var cardUid by remember { mutableStateOf("") }
     var isSaving by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
-        onDismissRequest = {
-            if (!isSaving) {
-                onDismiss()
-            }
-        },
+        onDismissRequest = { if (!isSaving) onDismiss() },
         containerColor = containerColor,
-        title = {
-            Text(
-                text = if (isEditing) {
-                    "Editar persona"
-                } else {
-                    "Agregar persona"
-                }
-            )
-        },
+        title = { Text(if (isEditing) "Editar persona" else "Agregar persona") },
         text = {
             Column(
-                modifier = Modifier.verticalScroll(
-                    rememberScrollState()
-                ),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 OutlinedTextField(
@@ -965,13 +864,10 @@ private fun EmployeeEditorDialog(
                         errorMessage = null
                     },
                     enabled = !isSaving,
-                    label = {
-                        Text("Nombre completo")
-                    },
+                    label = { Text("Nombre completo") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-
                 OutlinedTextField(
                     value = code,
                     onValueChange = {
@@ -979,16 +875,11 @@ private fun EmployeeEditorDialog(
                         errorMessage = null
                     },
                     enabled = !isSaving,
-                    label = {
-                        Text("Código del empleado")
-                    },
-                    placeholder = {
-                        Text("CYBER-001")
-                    },
+                    label = { Text("Código del empleado") },
+                    placeholder = { Text("CYBER-001") },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth()
                 )
-
                 if (!isEditing) {
                     OutlinedTextField(
                         value = cardUid,
@@ -997,32 +888,13 @@ private fun EmployeeEditorDialog(
                             errorMessage = null
                         },
                         enabled = !isSaving,
-                        label = {
-                            Text("UID de tarjeta (opcional)")
-                        },
-                        supportingText = {
-                            Text(
-                                "Copiá el UID real del lector " +
-                                        "o dejalo vacío."
-                            )
-                        },
+                        label = { Text("UID de tarjeta (opcional)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
-
-                    Text(
-                        text = "Este registro no crea una cuenta " +
-                                "para iniciar sesión.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
                 }
-
-                errorMessage?.let { message ->
-                    Text(
-                        text = message,
-                        color = MaterialTheme.colorScheme.error
-                    )
+                errorMessage?.let {
+                    Text(text = it, color = MaterialTheme.colorScheme.error)
                 }
             }
         },
@@ -1031,85 +903,45 @@ private fun EmployeeEditorDialog(
                 enabled = !isSaving,
                 onClick = {
                     when {
-                        name.trim().length < 2 -> {
-                            errorMessage = "Ingresá el nombre completo."
-                        }
-
-                        code.isBlank() -> {
-                            errorMessage = "Ingresá el código del empleado."
-                        }
-
-                        !isEditing && cardUid.trim().length > 100 -> {
-                            errorMessage =
-                                "El UID no puede superar 100 caracteres."
-                        }
-
+                        name.trim().length < 2 -> errorMessage = "Ingresá el nombre completo."
+                        code.isBlank() -> errorMessage = "Ingresá el código del empleado."
                         else -> {
                             isSaving = true
                             errorMessage = null
-
                             scope.launch {
                                 var saved = false
-
                                 try {
                                     if (employee == null) {
-                                        registerPerson(
-                                            name = name,
-                                            code = code,
-                                            cardUid = cardUid
-                                        )
+                                        registerPerson(name = name, code = code, cardUid = cardUid)
                                     } else {
-                                        updateEmployee(
-                                            employeeId = employee.id,
-                                            name = name,
-                                            code = code
-                                        )
+                                        updateEmployee(employeeId = employee.id, name = name, code = code)
                                     }
-
                                     saved = true
                                 } catch (cancelled: CancellationException) {
                                     throw cancelled
                                 } catch (_: Exception) {
-                                    errorMessage =
-                                        "No pudimos confirmar el guardado. " +
-                                                "Revisá la conexión, los permisos " +
-                                                "y que el código no esté repetido. " +
-                                                "Si agregaste una tarjeta, su UID " +
-                                                "también debe estar disponible. " +
-                                                "Actualizá la lista antes de reintentar."
+                                    errorMessage = "Error al guardar. Verificá que el código o UID no estén repetidos."
                                 } finally {
                                     isSaving = false
                                 }
-
-                                if (saved) {
-                                    onSaved()
-                                }
+                                if (saved) onSaved()
                             }
                         }
                     }
                 }
             ) {
-                Text(
-                    text = if (isSaving) {
-                        "Guardando…"
-                    } else {
-                        "Guardar"
-                    }
-                )
+                Text(text = if (isSaving) "Guardando…" else "Guardar")
             }
         },
         dismissButton = {
-            TextButton(
-                enabled = !isSaving,
-                onClick = onDismiss
-            ) {
+            TextButton(enabled = !isSaving, onClick = onDismiss) {
                 Text("Cancelar")
             }
         }
     )
 }
 
-// CONFIRMACIÓN PARA ELIMINAR O CAMBIAR ESTADO
+// ================= ACCIONES (ELIMINAR / ACTIVAR) =================
 
 @Composable
 private fun EmployeeActionDialog(
@@ -1124,34 +956,21 @@ private fun EmployeeActionDialog(
     onSuccess: () -> Unit
 ) {
     val scope = rememberCoroutineScope()
-
     var isWorking by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
 
     AlertDialog(
-        onDismissRequest = {
-            if (!isWorking) {
-                onDismiss()
-            }
-        },
+        onDismissRequest = { if (!isWorking) onDismiss() },
         containerColor = containerColor,
-        title = {
-            Text(title)
-        },
+        title = { Text(title) },
         text = {
             Column(
-                modifier = Modifier.verticalScroll(
-                    rememberScrollState()
-                ),
+                modifier = Modifier.verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Text(message)
-
                 errorMessage?.let {
-                    Text(
-                        text = it,
-                        color = MaterialTheme.colorScheme.error
-                    )
+                    Text(text = it, color = MaterialTheme.colorScheme.error)
                 }
             }
         },
@@ -1159,18 +978,12 @@ private fun EmployeeActionDialog(
             Button(
                 enabled = !isWorking && errorMessage == null,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isDestructive) {
-                        MaterialTheme.colorScheme.error
-                    } else {
-                        MaterialTheme.colorScheme.primary
-                    }
+                    containerColor = if (isDestructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
                 ),
                 onClick = {
                     isWorking = true
-
                     scope.launch {
                         var completed = false
-
                         try {
                             action()
                             completed = true
@@ -1181,34 +994,16 @@ private fun EmployeeActionDialog(
                         } finally {
                             isWorking = false
                         }
-
-                        if (completed) {
-                            onSuccess()
-                        }
+                        if (completed) onSuccess()
                     }
                 }
             ) {
-                Text(
-                    text = if (isWorking) {
-                        "Procesando…"
-                    } else {
-                        confirmText
-                    }
-                )
+                Text(text = if (isWorking) "Procesando…" else confirmText)
             }
         },
         dismissButton = {
-            TextButton(
-                enabled = !isWorking,
-                onClick = onDismiss
-            ) {
-                Text(
-                    text = if (errorMessage == null) {
-                        "Cancelar"
-                    } else {
-                        "Cerrar"
-                    }
-                )
+            TextButton(enabled = !isWorking, onClick = onDismiss) {
+                Text(text = if (errorMessage == null) "Cancelar" else "Cerrar")
             }
         }
     )
