@@ -12,7 +12,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import com.timevault.app.BuildConfig
 import com.timevault.app.SupabaseClient
-import io.github.jan.supabase.auth.auth
+import io.github.jan.supabase.gotrue.auth
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -61,7 +61,7 @@ private suspend fun sendEmployeeInvitation(
             )
             connection.setRequestProperty(
                 "apikey",
-                BuildConfig.SUPABASE_ANON_KEY
+                BuildConfig.SUPABASE_KEY
             )
             connection.setRequestProperty(
                 "Content-Type",

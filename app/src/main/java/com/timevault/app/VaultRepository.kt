@@ -2,79 +2,78 @@ package com.timevault.app
 
 import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.realtime.PostgresAction
-import io.github.jan.supabase.realtime.Realtime
 import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.postgresChangeFlow
+import io.github.jan.supabase.realtime.realtime
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.decodeFromJsonElement
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+
+@Serializable
+data class AccesoSimpleDto(
+    val uid: String = "",
+    val estado: String = ""
+)
 
 class VaultRepository {
     private val client = SupabaseClient.client
-    private val table = "vault_settings"
 
-    /**
-     * Obtiene el estado actual de la cerradura.
-     */
-    suspend fun getVaultState(): VaultState? {
-        return try {
-            client.postgrest[table]
-                .select()
-                .decodeSingleOrNull<VaultState>()
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
+    private val json = Json {
+        ignoreUnknownKeys = true
+        coerceInputValues = true
+    }
+
+    suspend fun getVaultState(): Result<VaultSettingsDto> = runCatching {
+        client.postgrest.from("vault_settings")
+            .select { filter { eq("id", 1) } }
+            .decodeSingle<VaultSettingsDto>()
+    }
+
+    suspend fun getLastScannedUid(): String? = runCatching {
+        val list = client.postgrest.from("accesos")
+            .select {
+                order("id", io.github.jan.supabase.postgrest.query.Order.DESCENDING)
+                limit(1)
+            }
+            .decodeList<AccesoSimpleDto>()
+        list.firstOrNull()?.uid
+    }.getOrNull()
+
+    suspend fun updateLockStatus(lock: Boolean): Result<Unit> = runCatching {
+        client.postgrest.from("vault_settings").update(
+            {
+                VaultSettingsDto::isLocked setTo lock
+                if (!lock) VaultSettingsDto::lockUntil setTo null
+            }
+        ) {
+            filter { eq("id", 1) }
         }
     }
 
-    /**
-     * Escucha cambios en tiempo real desde Supabase.
-     */
-    fun observeVaultState(): Flow<VaultState?> {
-        val channel = client.realtime.channel("vault_changes")
+    fun observeVaultChanges(): Flow<VaultSettingsDto> {
+        val channel = client.realtime.channel("vault_realtime")
         return channel.postgresChangeFlow<PostgresAction.Update>(schema = "public") {
-            table = this@VaultRepository.table
-        }.map { action ->
-            client.postgrest.decodeJson<VaultState>(action.record)
+            table = "vault_settings"
         }
+            .onStart { channel.subscribe() }
+            .map { action ->
+                json.decodeFromJsonElement<VaultSettingsDto>(action.record)
+            }
     }
 
-    /**
-     * Actualiza el estado de bloqueo de la cerradura.
-     */
-    suspend fun updateLockStatus(isLocked: Boolean, lockUntil: String? = null) {
-        try {
-            client.postgrest[table].update(
-                {
-                    VaultState::isLocked setTo isLocked
-                    VaultState::lockUntil setTo lockUntil
-                    VaultState::updatedAt setTo "now()" // Supabase handle via RPC or DB default is better
-                }
-            ) {
-                filter {
-                    // Asumimos un ID único para la cerradura o manejamos por configuración
-                    VaultState::id eq 1 
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
+    fun observeLastAccess(): Flow<String> {
+        val channel = client.realtime.channel("accesos_realtime")
+        return channel.postgresChangeFlow<PostgresAction.Insert>(schema = "public") {
+            table = "accesos"
         }
-    }
-
-    /**
-     * Autoriza un UID específico para apertura temporal.
-     */
-    suspend fun authorizeUid(uid: String?) {
-        try {
-            client.postgrest[table].update(
-                {
-                    VaultState::authorizedUid setTo uid
-                }
-            ) {
-                filter { VaultState::id eq 1 }
+            .onStart { channel.subscribe() }
+            .map { action ->
+                action.record.jsonObject["uid"]?.jsonPrimitive?.content.orEmpty()
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
-        }
     }
 }

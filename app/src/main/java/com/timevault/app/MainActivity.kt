@@ -25,9 +25,9 @@ import androidx.lifecycle.lifecycleScope
 import com.timevault.app.ui.EmployeeHomeScreen
 import com.timevault.app.ui.LoginScreen
 import com.timevault.app.ui.TimeVaultApp
-import io.github.jan.supabase.auth.auth
-import io.github.jan.supabase.auth.status.SessionStatus
-import io.github.jan.supabase.postgrest.from
+import io.github.jan.supabase.gotrue.SessionStatus
+import io.github.jan.supabase.gotrue.auth
+import io.github.jan.supabase.postgrest.postgrest
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.flow.first
@@ -76,7 +76,7 @@ class MainActivity : ComponentActivity() {
             val auth = remember { SupabaseClient.client.auth }
 
             val sessionStatus by auth.sessionStatus.collectAsState(
-                initial = SessionStatus.Initializing
+                initial = SessionStatus.LoadingFromStorage
             )
 
             val onLogout: () -> Unit = {
@@ -146,7 +146,7 @@ class MainActivity : ComponentActivity() {
                             )
                         }
 
-                        sessionStatus is SessionStatus.Initializing -> {
+                        sessionStatus is SessionStatus.LoadingFromStorage -> {
                             LoadingScreen("Verificando tu acceso…")
                         }
 
@@ -266,7 +266,7 @@ class MainActivity : ComponentActivity() {
                 withTimeout(30_000L) {
                     // Esperar a que termine de restaurarse la sesión.
                     auth.sessionStatus.first {
-                        it !is SessionStatus.Initializing
+                        it !is SessionStatus.LoadingFromStorage
                     }
 
                     val parameters = Uri.parse(
@@ -316,7 +316,6 @@ class MainActivity : ComponentActivity() {
                     passwordUserId = verifiedUser.id
                 }
 
-                // Quitar los tokens del Intent después de procesarlos.
                 incomingIntent.data = null
                 setIntent(incomingIntent)
             } catch (_: TimeoutCancellationException) {
@@ -478,7 +477,7 @@ private fun SetPasswordScreen(
                                             expectedUserId
                                 )
 
-                                auth.updateUser {
+                                auth.modifyUser(true) {
                                     this.password = newPassword
                                 }
 
@@ -562,9 +561,8 @@ private fun RoleAccessGate(
                 return@LaunchedEffect
             }
 
-            // Consultar el perfil de la cuenta autenticada.
             val profile = withTimeout(20_000L) {
-                SupabaseClient.client
+                SupabaseClient.client.postgrest
                     .from("perfiles")
                     .select {
                         filter {
@@ -624,8 +622,6 @@ private fun RoleAccessGate(
                     return@LaunchedEffect
                 }
 
-                // La función SQL del panel verifica que
-                // la persona y la empresa estén activas.
                 selectedRole = role
                 isAuthorized = true
 
@@ -640,9 +636,8 @@ private fun RoleAccessGate(
 
             etapa = "consultar la empresa"
 
-            // Verificar la empresa del administrador.
             val company = withTimeout(20_000L) {
-                SupabaseClient.client
+                SupabaseClient.client.postgrest
                     .from("empresas")
                     .select {
                         filter {
@@ -681,8 +676,6 @@ private fun RoleAccessGate(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            // Mostrar solo nombres de excepciones.
-            // No mostrar tokens ni solicitudes completas.
             val tipos = generateSequence(error as Throwable) {
                 it.cause
             }

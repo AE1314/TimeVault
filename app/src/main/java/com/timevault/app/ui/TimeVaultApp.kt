@@ -6,6 +6,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shield
@@ -19,6 +20,8 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.timevault.app.VaultViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -36,6 +39,8 @@ fun TimeVaultApp(
     var selectedTab by rememberSaveable {
         mutableIntStateOf(0)
     }
+
+    val vaultViewModel: VaultViewModel = viewModel()
 
     val navy = Color(0xFF0C192B)
     val mint = Color(0xFF63E1CC)
@@ -120,13 +125,15 @@ fun TimeVaultApp(
             val tabLabels = listOf(
                 "Accesos",
                 "Personal",
-                "Reportes"
+                "Reportes",
+                "Caja Fuerte"
             )
 
             val tabIcons = listOf(
                 Icons.Default.List,
                 Icons.Default.Person,
-                Icons.Default.DateRange
+                Icons.Default.DateRange,
+                Icons.Default.Lock
             )
 
             Scaffold(
@@ -251,6 +258,11 @@ fun TimeVaultApp(
                         )
 
                         2 -> ReportsScreen(
+                            isDarkTheme = isDarkTheme
+                        )
+
+                        3 -> VaultControlScreen(
+                            viewModel = vaultViewModel,
                             isDarkTheme = isDarkTheme
                         )
                     }

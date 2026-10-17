@@ -1,7 +1,7 @@
 package com.timevault.app
 
-import io.github.jan.supabase.auth.auth
-import io.github.jan.supabase.auth.providers.builtin.Email
+import io.github.jan.supabase.gotrue.auth
+import io.github.jan.supabase.gotrue.providers.builtin.Email
 
 class AuthRepository {
     private val auth = SupabaseClient.client.auth
