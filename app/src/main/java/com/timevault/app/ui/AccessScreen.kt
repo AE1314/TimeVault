@@ -45,49 +45,46 @@ private fun formatTimestamp(rawIso: String?): String {
     if (rawIso.isNullOrBlank() || rawIso == "null") return "--:--"
 
     return try {
-        val clean = rawIso.replace("Z", "+00:00")
-        val instant = java.time.Instant.parse(clean)
-        val zonedDateTime = instant.atZone(java.time.ZoneId.of("America/Guatemala"))
-        val formatter = java.time.format.DateTimeFormatter.ofPattern("hh:mm a · yyyy-MM-dd", Locale.US)
-        zonedDateTime.format(formatter)
-    } catch (_: Exception) {
-        try {
-            val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
-                timeZone = TimeZone.getTimeZone("UTC")
-            }
-            val date = parser.parse(rawIso.take(19)) ?: return rawIso.take(16).replace("T", " ")
-            val formatter = SimpleDateFormat("hh:mm a · yyyy-MM-dd", Locale.US).apply {
-                timeZone = TimeZone.getTimeZone("America/Guatemala")
-            }
-            formatter.format(date)
-        } catch (_: Exception) {
-            rawIso.take(16).replace("T", " ")
+        val parser = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
         }
+        val cleanIso = if (rawIso.length >= 19) rawIso.substring(0, 19) else rawIso
+        val date = parser.parse(cleanIso) ?: return rawIso.take(16).replace("T", " ")
+
+        val outputFormat = SimpleDateFormat("hh:mm a · yyyy-MM-dd", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("America/Guatemala")
+        }
+        outputFormat.format(date)
+    } catch (_: Exception) {
+        if (rawIso.length >= 16) rawIso.substring(0, 16).replace("T", " ") else "--:--"
     }
 }
 
 private suspend fun loadDirectAccessSummary(): AdminAccessSummary {
-    // 1. Mapeo UID -> Nombre
-    val personasRaw = SupabaseClient.client
-        .from("personas")
-        .select(columns = Columns.raw("id,nombre,tarjetas(uid)"))
-        .decodeList<JsonObject>()
-
     val uidToName = mutableMapOf<String, String>()
-    personasRaw.forEach { row ->
-        val name = row["nombre"]?.jsonPrimitive?.contentOrNull.orEmpty()
-        val cards = row["tarjetas"] as? JsonArray
-        cards?.forEach { cardElem ->
-            val cardUid = cardElem.jsonObject["uid"]?.jsonPrimitive?.contentOrNull.orEmpty()
-            if (cardUid.isNotBlank() && name.isNotBlank()) {
-                uidToName[cardUid.trim().uppercase()] = name
+
+    try {
+        val personasRaw = SupabaseClient.client
+            .from("personas")
+            .select(columns = Columns.raw("id,nombre,tarjetas(uid)"))
+            .decodeList<JsonObject>()
+
+        personasRaw.forEach { row ->
+            val name = row["nombre"]?.jsonPrimitive?.contentOrNull.orEmpty()
+            val cards = row["tarjetas"] as? JsonArray
+            cards?.forEach { cardElem ->
+                val cardUid = cardElem.jsonObject["uid"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                if (cardUid.isNotBlank() && name.isNotBlank()) {
+                    uidToName[cardUid.trim().uppercase()] = name
+                }
             }
         }
+    } catch (_: Exception) {
+        // En caso de fallo de red al consultar nombres continúa con mapa vacío
     }
 
-    // 2. Consulta a accesos sin límite
     val list = SupabaseClient.client.from("accesos")
-        .select {
+        .select(columns = Columns.raw("id,uid,estado,direccion,accion,ocurrido_en")) {
             order("id", Order.DESCENDING)
         }
         .decodeList<JsonObject>()
@@ -99,7 +96,6 @@ private suspend fun loadDirectAccessSummary(): AdminAccessSummary {
         val direccion = obj["direccion"]?.jsonPrimitive?.contentOrNull.orEmpty()
         val accion = obj["accion"]?.jsonPrimitive?.contentOrNull.orEmpty()
 
-        // Columna real en Supabase: ocurrido_en
         val rawTime = obj["ocurrido_en"]?.jsonPrimitive?.contentOrNull
             ?: obj["creado_en"]?.jsonPrimitive?.contentOrNull
             ?: obj["created_at"]?.jsonPrimitive?.contentOrNull

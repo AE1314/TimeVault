@@ -24,7 +24,6 @@ unsigned long lastPollTime = 0;
 const unsigned long POLL_INTERVAL = 2000;
 
 bool puertaAbierta = false;
-String uidActivoEnSala = "";
 
 WiFiClientSecure client;
 
@@ -34,8 +33,10 @@ void conectarWiFi();
 void checkVaultSettings();
 void syncLockToSupabase(bool lock);
 bool verificarAccesoEnSupabase(String uid);
+String obtenerUltimaDireccion(String uid);
 void registrarAcceso(String uid, bool autorizado, String direccion, String accion);
 void aplicarEstadoFisico(bool abierta);
+void abrirPulsoPaso();
 void feedbackAbrir();
 void feedbackCerrar();
 void feedbackError();
@@ -59,7 +60,7 @@ void loop() {
     conectarWiFi();
   }
 
-  // Sincronización remota desde la app
+  // Sincronización remota desde la app (interruptor Caja Fuerte)
   if (millis() - lastPollTime >= POLL_INTERVAL) {
     lastPollTime = millis();
     checkVaultSettings();
@@ -80,43 +81,63 @@ void loop() {
   Serial.print("\n[RFID] Tarjeta detectada: ");
   Serial.println(uidString);
 
-  // 1. Validar si la tarjeta existe y está activa en Supabase
+  // 1. REGLA DE BLOQUEO TOTAL: Si la bóveda está cerrada/bloqueada, nadie entra
+  if (!puertaAbierta) {
+    Serial.println("[RFID] DENEGADO: La bóveda está BLOQUEADA desde la app.");
+    feedbackError();
+    registrarAcceso(uidString, false, "IN", "REJECT_VAULT_LOCKED");
+    mfrc522.PICC_HaltA();
+    mfrc522.PCD_StopCrypto1();
+    delay(1500);
+    return;
+  }
+
+  // 2. Si la bóveda está habilitada, validar si la tarjeta está activa
   bool autorizado = verificarAccesoEnSupabase(uidString);
 
   if (!autorizado) {
     Serial.println("[RFID] DENEGADO: Tarjeta no autorizada.");
     feedbackError();
-    registrarAcceso(uidString, false, puertaAbierta ? "OUT" : "IN", "REJECT_UNAUTHORIZED");
-    delay(1000);
+    registrarAcceso(uidString, false, "IN", "REJECT_UNAUTHORIZED");
+    mfrc522.PICC_HaltA();
+    mfrc522.PCD_StopCrypto1();
+    delay(1500);
     return;
   }
 
-  // 2. Control de acceso
-  if (puertaAbierta) {
-    puertaAbierta = false;
-    aplicarEstadoFisico(false);
+  // 3. Determinar Entrada o Salida según el historial propio de este usuario
+  String ultimaDireccion = obtenerUltimaDireccion(uidString);
+  String nuevaDireccion = "";
+  String nuevaAccion = "";
+
+  if (ultimaDireccion == "IN") {
+    nuevaDireccion = "OUT";
+    nuevaAccion = "LOCK";
+    Serial.print("[PUERTA] SALIDA AUTORIZADA por: ");
+    Serial.println(uidString);
     feedbackCerrar();
-    Serial.println("[PUERTA] SALIDA AUTORIZADA. CERRADA / BLOQUEADA.");
-    registrarAcceso(uidString, true, "OUT", "LOCK");
-    syncLockToSupabase(true);
   } else {
-    puertaAbierta = true;
-    aplicarEstadoFisico(true);
-    feedbackAbrir();
+    nuevaDireccion = "IN";
+    nuevaAccion = "UNLOCK";
     Serial.print("[PUERTA] ENTRADA AUTORIZADA por: ");
     Serial.println(uidString);
-    registrarAcceso(uidString, true, "IN", "UNLOCK");
-    syncLockToSupabase(false);
+    feedbackAbrir();
   }
 
+  // Registrar marcación en Supabase
+  registrarAcceso(uidString, true, nuevaDireccion, nuevaAccion);
+
+  // Libera el pestillo por 3 segundos para permitir el paso y regresa al estado
+  abrirPulsoPaso();
+
+  mfrc522.PICC_HaltA();
+  mfrc522.PCD_StopCrypto1();
   delay(1500);
 }
 
 // ================= ACTUADORES =================
 void setupActuadores() {
-  // En reposo queremos circuito cerrado en NO con relé Active-LOW:
-  // Se escribe LOW para activar la bobina y conmutar el contacto NO a cerrado
-  digitalWrite(RELAY_PIN, LOW);
+  digitalWrite(RELAY_PIN, LOW); // Reposo: bobina energizada (cierra circuito NO)
   pinMode(RELAY_PIN, OUTPUT);
 
   pinMode(LED_ROJO, OUTPUT);
@@ -129,16 +150,20 @@ void setupActuadores() {
 
 void aplicarEstadoFisico(bool abierta) {
   if (abierta) {
-    // Al abrir: apagamos la bobina (HIGH), el contacto NO vuelve a su estado abierto (corta circuito)
-    digitalWrite(RELAY_PIN, HIGH);
+    digitalWrite(RELAY_PIN, HIGH); // Corta circuito para soltar pestillo
     digitalWrite(LED_ROJO, HIGH);  // Apaga rojo
     digitalWrite(LED_VERDE, LOW);  // Enciende verde
   } else {
-    // En reposo (cerrada): energizamos la bobina (LOW), el contacto NO se une a COM (circuito cerrado)
-    digitalWrite(RELAY_PIN, LOW);
+    digitalWrite(RELAY_PIN, LOW);  // Energiza circuito para trabar pestillo
     digitalWrite(LED_VERDE, HIGH); // Apaga verde
     digitalWrite(LED_ROJO, LOW);   // Enciende rojo
   }
+}
+
+void abrirPulsoPaso() {
+  aplicarEstadoFisico(true);
+  delay(3000); // Ventana de paso
+  aplicarEstadoFisico(false);
 }
 
 void feedbackAbrir() {
@@ -223,6 +248,32 @@ bool verificarAccesoEnSupabase(String uid) {
   }
   client.stop();
   return permitido;
+}
+
+String obtenerUltimaDireccion(String uid) {
+  if (WiFi.status() != WL_CONNECTED) return "OUT";
+
+  HTTPClient http;
+  String url = String(SUPABASE_URL) + "/rest/v1/accesos?uid=eq." + uid + "&estado=eq.AUTHORIZED&select=direccion&order=id.desc&limit=1";
+  String direccion = "OUT";
+
+  http.setTimeout(2500);
+  if (http.begin(client, url)) {
+    http.addHeader("apikey", SUPABASE_KEY);
+    http.addHeader("Authorization", String("Bearer ") + SUPABASE_KEY);
+
+    int httpCode = http.GET();
+    if (httpCode == HTTP_CODE_OK) {
+      String payload = http.getString();
+      StaticJsonDocument<256> doc;
+      if (!deserializeJson(doc, payload) && doc.size() > 0) {
+        direccion = doc[0]["direccion"] | "OUT";
+      }
+    }
+    http.end();
+  }
+  client.stop();
+  return direccion;
 }
 
 void checkVaultSettings() {

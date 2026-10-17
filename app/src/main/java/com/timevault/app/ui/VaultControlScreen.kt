@@ -3,8 +3,10 @@ package com.timevault.app.ui
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
@@ -26,6 +28,7 @@ fun VaultControlScreen(
     isDarkTheme: Boolean = true
 ) {
     val uiState by viewModel.uiState.collectAsState()
+    val scrollState = rememberScrollState()
 
     val navy = Color(0xFF0C192B)
     val mint = Color(0xFF63E1CC)
@@ -75,9 +78,10 @@ fun VaultControlScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(backgroundColor)
-            .padding(24.dp),
+            .verticalScroll(scrollState)
+            .padding(horizontal = 24.dp, vertical = 20.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(24.dp)
+        verticalArrangement = Arrangement.spacedBy(20.dp)
     ) {
         // Encabezado
         Column(
@@ -147,9 +151,9 @@ fun VaultControlScreen(
         // Indicador Visual Circular
         Box(
             modifier = Modifier
-                .size(220.dp)
+                .size(200.dp)
                 .background(statusColor.copy(alpha = 0.1f), CircleShape)
-                .padding(16.dp),
+                .padding(14.dp),
             contentAlignment = Alignment.Center
         ) {
             Surface(
@@ -166,14 +170,14 @@ fun VaultControlScreen(
                         imageVector = if (uiState.isLocked) Icons.Default.Lock else Icons.Default.LockOpen,
                         contentDescription = null,
                         tint = Color.White,
-                        modifier = Modifier.size(64.dp)
+                        modifier = Modifier.size(56.dp)
                     )
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = if (uiState.isLocked) "BLOQUEADA" else "ABIERTA",
                         color = Color.White,
                         fontWeight = FontWeight.Black,
-                        fontSize = 20.sp
+                        fontSize = 18.sp
                     )
                 }
             }
@@ -182,14 +186,14 @@ fun VaultControlScreen(
         // Información de RFID
         Card(
             modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(24.dp),
+            shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(
                 containerColor = cardColor
             ),
             border = androidx.compose.foundation.BorderStroke(1.dp, borderColor)
         ) {
             Column(
-                modifier = Modifier.padding(20.dp),
+                modifier = Modifier.padding(18.dp),
                 horizontalAlignment = Alignment.Start
             ) {
                 Text(
@@ -198,18 +202,18 @@ fun VaultControlScreen(
                     fontWeight = FontWeight.Bold,
                     color = textColor
                 )
-                
+
                 HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 12.dp),
+                    modifier = Modifier.padding(vertical = 10.dp),
                     color = borderColor
                 )
-                
+
                 Text(
                     text = "Último UID detectado:",
                     style = MaterialTheme.typography.bodySmall,
                     color = secondaryColor
                 )
-                
+
                 Text(
                     text = uiState.lastScannedUid ?: "Sin lecturas recientes",
                     style = MaterialTheme.typography.titleLarge,
@@ -220,26 +224,24 @@ fun VaultControlScreen(
             }
         }
 
-        Spacer(modifier = Modifier.weight(1f))
-
         // Botón de Acción Principal
         Button(
             onClick = { viewModel.toggleLock() },
             enabled = !uiState.isLoading,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(64.dp),
+                .height(58.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = if (uiState.isLocked) Color(0xFF388E3C) else Color(0xFFD32F2F),
                 disabledContainerColor = secondaryColor.copy(alpha = 0.3f)
             ),
-            shape = RoundedCornerShape(18.dp)
+            shape = RoundedCornerShape(16.dp)
         ) {
             if (uiState.isLoading) {
-                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(28.dp))
+                CircularProgressIndicator(color = Color.White, modifier = Modifier.size(24.dp))
             } else {
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
@@ -248,7 +250,7 @@ fun VaultControlScreen(
                     )
                     Text(
                         text = if (uiState.isLocked) "DESBLOQUEAR AHORA" else "BLOQUEAR AHORA",
-                        fontSize = 18.sp,
+                        fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
                     )
                 }
@@ -261,10 +263,12 @@ fun VaultControlScreen(
                 text = error,
                 color = Color(0xFFD32F2F),
                 style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.padding(top = 8.dp),
+                modifier = Modifier.padding(top = 4.dp),
                 fontWeight = FontWeight.SemiBold
             )
         }
+
+        // Margen inferior para librar la BottomBar
+        Spacer(modifier = Modifier.height(48.dp))
     }
 }
-
