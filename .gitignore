@@ -25,3 +25,4 @@ local.properties
 *.keystore
 .env
 .env.*
+CodigoESP32/secrets.h
